@@ -7,6 +7,13 @@
 //
 
 #import "AppDelegate.h"
+#import "MosquittoCenter.h"
+
+@interface AppDelegate ()
+{
+    MosquittoCenter * _center;
+}
+@end
 
 @implementation AppDelegate
 
@@ -16,7 +23,25 @@
     // Override point for customization after application launch.
     self.window.backgroundColor = [UIColor whiteColor];
     [self.window makeKeyAndVisible];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(mosquittoStateChanged:)
+                                                 name:MosquittoStateChangedNotification
+                                               object:nil];
+    _center = [[MosquittoCenter alloc] initWithClientId:@"0000"
+                                           cleanSession:YES
+                                                   host:@"127.0.0.1"
+                                                   port:1883
+                                              keepAlive:20];
+    [_center start];
+    
     return YES;
+}
+
+- (void)mosquittoStateChanged:(NSNotification *)notification
+{
+    if (MosquittoStateConnected == _center.mosquttoState) {
+        
+    }
 }
 
 - (void)applicationWillResignActive:(UIApplication *)application
