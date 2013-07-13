@@ -8,10 +8,13 @@
 
 #import "AppDelegate.h"
 #import "MosquittoCenter.h"
+#import "MosquittoTopic.h"
+#import "MosquittoMessage.h"
 
 @interface AppDelegate ()
 {
     MosquittoCenter * _center;
+    NSTimer * _timer;
 }
 @end
 
@@ -31,7 +34,7 @@
                                            cleanSession:YES
                                                    host:@"127.0.0.1"
                                                    port:1883
-                                              keepAlive:20];
+                                              keepAlive:2 * 60];
     [_center start];
     
     return YES;
@@ -40,7 +43,31 @@
 - (void)mosquittoStateChanged:(NSNotification *)notification
 {
     if (MosquittoStateConnected == _center.mosquttoState) {
+        [_center subscribe:[MosquittoTopic topicWithTopic:@"xxxx" qos:MqttQosJustOnce]];
         
+        if (nil == _timer) {
+            _timer = [NSTimer scheduledTimerWithTimeInterval:2 target:self selector:@selector(sendMessage:) userInfo:nil repeats:YES];
+        }
+    }
+    else if(MosquittoStateDisconnected == _center.mosquttoState) {
+        [_center halt];
+        _center = nil;
+    }
+}
+
+- (void)sendMessage:(NSTimer *)timer
+{
+    static int i = 0;
+    if (MosquittoStateConnected == _center.mosquttoState) {
+        MosquittoTopic * t = [MosquittoTopic topicWithTopic:@"xxxx" qos:2];
+        MosquittoMessage * m = [MosquittoMessage messageWithTopic:t qos:2 data:[@"test" dataUsingEncoding:NSUTF8StringEncoding]];
+        [_center publish:m];
+        i ++;
+        
+        if (i == 5) {
+            [_timer invalidate];
+            [_center disconnect];
+        }
     }
 }
 

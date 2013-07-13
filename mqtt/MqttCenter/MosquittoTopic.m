@@ -15,6 +15,17 @@
 @end
 
 @implementation MosquittoTopic
+
++ (id)topicWithTopic:(NSString *)topic qos:(MqttQos)qos
+{
+    return [[[self class] alloc] initWithTopic:topic qos:qos];
+}
+
+- (id)copyWithZone:(NSZone *)zone
+{
+    return [[[self class] allocWithZone:zone] initWithTopic:self.string qos:self.qos];
+}
+
 - (id)initWithTopic:(NSString *)topic qos:(MqttQos)qos
 {
     self = [super init];

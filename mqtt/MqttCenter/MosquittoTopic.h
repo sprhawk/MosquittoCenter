@@ -9,7 +9,9 @@
 #import <Foundation/Foundation.h>
 #import "MosquittoCenter.h"
 
-@interface MosquittoTopic : NSObject
+@interface MosquittoTopic : NSObject<NSCopying>
 @property (nonatomic, strong, readonly) NSString *string;
 @property (nonatomic, assign, readonly) MqttQos qos;
++ (id)topicWithTopic:(NSString *)topic qos:(MqttQos)qos;
+- (id)initWithTopic:(NSString *)topic qos:(MqttQos)qos;
 @end

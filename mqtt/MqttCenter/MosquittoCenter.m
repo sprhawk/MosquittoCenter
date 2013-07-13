@@ -11,13 +11,13 @@
 #import "MosquittoTopic.h"
 #import "MosquittoMessage.h"
 
-void on_connect(const struct mosquitto *, void *, int);
-void on_disconnect(const struct mosquitto *, void *, int);
-void on_publish(const struct mosquitto *, void *, int);
-void on_subscribe(const struct mosquitto *, void *, int, int, const int *);
-void on_unsubscribe(const struct mosquitto *, void *, int);
-void on_log(const struct mosquitto *, void *, int, const char *);
-void on_message(const struct mosquitto *, void *, const struct mosquitto_message *);
+void on_connect(struct mosquitto *, void *, int);
+void on_disconnect(struct mosquitto *, void *, int);
+void on_publish(struct mosquitto *, void *, int);
+void on_subscribe(struct mosquitto *, void *, int, int, const int *);
+void on_unsubscribe(struct mosquitto *, void *, int);
+void on_log(struct mosquitto *, void *, int, const char *);
+void on_message(struct mosquitto *, void *, const struct mosquitto_message *);
 
 NSString * const MosquittoStateChangedNotification = @"MosquittoStateChangedNotification";
 
@@ -84,6 +84,20 @@ NSString * const MosquittoStateChangedNotification = @"MosquittoStateChangedNoti
     return YES;
 }
 
+- (BOOL)halt
+{
+    [self disconnect];
+    [_mosquittoThread cancel];
+    //prevent object is freed before thread exited
+    [_mosquittoThreadExitLock lock];
+    if (_mosq) {
+        mosquitto_destroy(_mosq);
+        _mosq = NULL;
+    }
+    [_mosquittoThreadExitLock unlock];
+    return YES;
+}
+
 - (BOOL)disconnect
 {
     if (_mosq) {
@@ -101,22 +115,22 @@ NSString * const MosquittoStateChangedNotification = @"MosquittoStateChangedNoti
     return YES;
 }
 
-- (void)registerObserver:(id<MosquittoCenterObserver>)object forTopic:(NSString *)topic
+- (void)registerObserver:(id<MosquittoCenterObserver>)object forTopic:(MosquittoTopic *)topic
 {
     NSMutableSet * delegates = _topicDelegates[topic];
     if (nil == delegates) {
         delegates = [[NSMutableSet alloc] initWithCapacity:1];
-        _topicDelegates[topic] = delegates;
+        _topicDelegates[topic.string] = delegates;
     }
     [delegates addObject:object];
 }
 
-- (void)removeObserver:(id<MosquittoCenterObserver>)object forTopic:(NSString *)topic
+- (void)removeObserver:(id<MosquittoCenterObserver>)object forTopic:(MosquittoTopic *)topic
 {
     NSMutableSet * delegates = _topicDelegates[topic];
     [delegates addObject:object];
     if (0 == [delegates count]) {
-        _topicDelegates[topic] = nil;
+        _topicDelegates[topic.string] = nil;
     }
 }
 
@@ -130,27 +144,25 @@ NSString * const MosquittoStateChangedNotification = @"MosquittoStateChangedNoti
         }
         else {
             //make _mosq to be used only on MosquittoThread to prevent from using mutex lock
-            [self performSelector:@selector(subscribe:) onThread:_mosquittoThread withObject:topic waitUntilDone:YES];
+            [self performSelector:@selector(subscribe:) onThread:_mosquittoThread withObject:topic waitUntilDone:NO];
         }
         return YES;
     }
     return NO;
 }
 
-- (BOOL)publishTopic:(MosquittoTopic *)topic message:(MosquittoMessage *)message
+- (BOOL)publish:(MosquittoMessage *)message
 {
     if (_mosq) {
         if ([NSThread currentThread] == _mosquittoThread) {
             int mid = 0;
-            const char * str = [topic.string cStringUsingEncoding:NSUTF8StringEncoding];
-            NSData * payload = [message payload];
+            const char * str = [message.topic.string cStringUsingEncoding:NSUTF8StringEncoding];
+            NSData * payload = [message data];
             mosquitto_publish(_mosq, &mid, str, payload.length, payload.bytes, message.qos, message.needRetain);
         }
         else {
             //make _mosq to be used only on MosquittoThread to prevent from using mutex lock
-            NSDictionary * param = @{@"topic": topic,
-                                     @"qos": [NSNumber numberWithInteger:(int)0]};
-            [self performSelector:@selector(subscribe:) onThread:_mosquittoThread withObject:param waitUntilDone:YES];
+            [self performSelector:@selector(publish:) onThread:_mosquittoThread withObject:[message copy] waitUntilDone:YES];
         }
         return YES;
     }
@@ -166,6 +178,15 @@ NSString * const MosquittoStateChangedNotification = @"MosquittoStateChangedNoti
         if (NULL == _mosq) {
             return ;
         }
+        
+        mosquitto_connect_callback_set(_mosq, on_connect);
+        mosquitto_disconnect_callback_set(_mosq, on_disconnect);
+        mosquitto_subscribe_callback_set(_mosq, on_subscribe);
+        mosquitto_unsubscribe_callback_set(_mosq, on_unsubscribe);
+        mosquitto_publish_callback_set(_mosq, on_publish);
+        mosquitto_message_callback_set(_mosq, on_message);
+        mosquitto_log_callback_set(_mosq, on_log);
+        
         self.mosquttoState = MosquittoStateInitialized;
         const char * host = [self.host cStringUsingEncoding:NSUTF8StringEncoding];
         int port = self.port;
@@ -177,8 +198,9 @@ NSString * const MosquittoStateChangedNotification = @"MosquittoStateChangedNoti
         while (!currentThread.isCancelled) {
             NSRunLoop * runLoop = [NSRunLoop currentRunLoop];
             @autoreleasepool {
-                [runLoop runMode:NSRunLoopCommonModes beforeDate:[NSDate dateWithTimeIntervalSinceNow:1.0]];
+                [runLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:1.0]];
                 mosquitto_loop(_mosq, -1, 1);//max packets is not used
+                [NSThread sleepForTimeInterval:(self.keepAlive > .1)?.1:self.keepAlive/2];
             }
         }
         [_mosquittoThreadExitLock unlock];
@@ -225,7 +247,8 @@ NSString * const MosquittoStateChangedNotification = @"MosquittoStateChangedNoti
 - (void)on_publish:(const struct mosquitto * )mosq messageId:(int)messageId
 {
     if (self.handleMessageOnMainThread) {
-        dispatch_sync(dispatch_get_main_queue(), ^{
+        //because of thread lock when calling stop, dispatch_sync in main queue will be blocked
+        dispatch_async(dispatch_get_main_queue(), ^{
             [self handlePublish:messageId];
         });
     }
@@ -235,19 +258,24 @@ NSString * const MosquittoStateChangedNotification = @"MosquittoStateChangedNoti
 }
 - (void)on_message:(const struct mosquitto * )mosq message:(const struct mosquitto_message *)message
 {
+    MqttQos qos = (MqttQos)(message->qos >= MqttQosUnknown)?MqttQosUnknown:message->qos;
+    NSString * string = [NSString stringWithCString:message->topic encoding:NSUTF8StringEncoding];
+    MosquittoTopic * topic = [MosquittoTopic topicWithTopic:string qos:qos];
+    NSData * payload = [NSData dataWithBytesNoCopy:message->payload length:message->payloadlen freeWhenDone:NO];
+    MosquittoMessage * msg = [MosquittoMessage messageWithTopic:topic qos:qos data:payload];
     if (self.handleMessageOnMainThread) {
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            [self handleMessage:message];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self handleMessage:msg];
         });
     }
     else {
-        [self handleMessage:message];
+        [self handleMessage:msg];
     }
 }
 - (void)on_subscribe:(const struct mosquitto * )mosq messageId:(int)messageId qosCount:(int)qosCount grantedQos:(const int *)grantedQos
 {
     if (self.handleMessageOnMainThread) {
-        dispatch_sync(dispatch_get_main_queue(), ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
             [self handleSubscribeMessageId:messageId qosCount:qosCount grantedQos:grantedQos];
         });
     }
@@ -258,7 +286,7 @@ NSString * const MosquittoStateChangedNotification = @"MosquittoStateChangedNoti
 - (void)on_unsubscribe:(const struct mosquitto * )mosq messageId:(int)messageId
 {
     if (self.handleMessageOnMainThread) {
-        dispatch_sync(dispatch_get_main_queue(), ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
             [self handleUnsubscribeMessageId:messageId];
         });
     }
@@ -279,9 +307,9 @@ NSString * const MosquittoStateChangedNotification = @"MosquittoStateChangedNoti
     NSLog(@"published:%d", messageId);
 }
 
-- (void)handleMessage:(const struct mosquitto_message *)message
+- (void)handleMessage:(MosquittoMessage *)message
 {
-    NSLog(@"payload:%d", message->payloadlen);
+    NSLog(@"payload:%d", message.data.length);
 }
 
 - (void)handleSubscribeMessageId:(int)messageId qosCount:(int)qosCount grantedQos:(const int *)grantedQos
@@ -299,11 +327,11 @@ NSString * const MosquittoStateChangedNotification = @"MosquittoStateChangedNoti
     @synchronized(self) {
         _mosquttoState = mosquttoState;
     }
-    NSNotification * n = [NSNotification notificationWithName:MosquittoStateChangedNotification
-                                                       object:self
-                                                     userInfo:nil];
-    NSNotificationCenter * center = [NSNotificationCenter defaultCenter];
-    dispatch_sync(dispatch_get_main_queue(), ^{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSNotification * n = [NSNotification notificationWithName:MosquittoStateChangedNotification
+                                                           object:self
+                                                         userInfo:nil];
+        NSNotificationCenter * center = [NSNotificationCenter defaultCenter];
         [center postNotification:n];
     });
 }
@@ -317,57 +345,51 @@ NSString * const MosquittoStateChangedNotification = @"MosquittoStateChangedNoti
 
 - (void)dealloc
 {
-    [_mosquittoThread cancel];
-    //prevent object is freed before thread exited
-    [_mosquittoThreadExitLock lock];
-    if (_mosq) {
-        mosquitto_destroy(_mosq);
-        _mosq = NULL;
-    }
-    [_mosquittoThreadExitLock unlock];
+    [self halt];
+    _topicDelegates = nil;
 }
 
 @end
 
 
 
-void on_connect(const struct mosquitto *mosq, void * obj, int rc)
+void on_connect(struct mosquitto *mosq, void * obj, int rc)
 {
     MosquittoCenter * center = (__bridge MosquittoCenter *)obj;
     [center on_connect:mosq result:rc];
 }
 
-void on_disconnect(const struct mosquitto *mosq, void *obj, int rc)
+void on_disconnect(struct mosquitto *mosq, void *obj, int rc)
 {
     MosquittoCenter * center = (__bridge MosquittoCenter *)obj;
     [center on_disconnect:mosq result:rc];
 }
 
-void on_publish(const struct mosquitto *mosq, void *obj, int messageid)
+void on_publish(struct mosquitto *mosq, void *obj, int messageid)
 {
     MosquittoCenter * center = (__bridge MosquittoCenter *)obj;
     [center on_publish:mosq messageId:messageid];
 }
 
-void on_message(const struct mosquitto *mosq, void *obj, const struct mosquitto_message * message)
+void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_message * message)
 {
     MosquittoCenter * center = (__bridge MosquittoCenter *)obj;
     [center on_message:mosq message:message];
 }
 
-void on_subscribe(const struct mosquitto *mosq, void *obj, int messageid, int qos_count, const int * granted_qos)
+void on_subscribe(struct mosquitto *mosq, void *obj, int messageid, int qos_count, const int * granted_qos)
 {
     MosquittoCenter * center = (__bridge MosquittoCenter *)obj;
     [center on_subscribe:mosq messageId:messageid qosCount:qos_count grantedQos:granted_qos];
 }
 
-void on_unsubscribe(const struct mosquitto *mosq, void *obj, int messageid)
+void on_unsubscribe(struct mosquitto *mosq, void *obj, int messageid)
 {
     MosquittoCenter * center = (__bridge MosquittoCenter *)obj;
     [center on_unsubscribe:mosq messageId:messageid];
 }
 
-void on_log(const struct mosquitto *mosq, void *obj, int level, const char * str)
+void on_log(struct mosquitto *mosq, void *obj, int level, const char * str)
 {
     MosquittoCenter * center = (__bridge MosquittoCenter *)obj;
     [center on_log:mosq level:level string:str];

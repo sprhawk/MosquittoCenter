@@ -34,6 +34,7 @@ typedef enum MqttQos {
     MqttQosAtMostOnce = 0,
     MqttQosAtLeastOnce = 1,
     MqttQosJustOnce = 2,
+    MqttQosUnknown,
 }MqttQos;
 
 extern NSString * const MosquittoStateChangedNotification;
@@ -62,14 +63,18 @@ extern NSString * const MosquittoStateChangedNotification;
                   port:(NSUInteger)port
              keepAlive:(NSUInteger)keepAlive;
 - (BOOL)start;
+- (BOOL)halt;
 - (BOOL)disconnect;
 - (BOOL)subscribe:(MosquittoTopic *)topic;
+- (BOOL)publish:(MosquittoMessage *)message;
 
+- (void)registerObserver:(id<MosquittoCenterObserver>)object forTopic:(MosquittoTopic *)topic;
+- (void)removeObserver:(id<MosquittoCenterObserver>)object forTopic:(MosquittoTopic *)topic;
+
+#pragma mark - overridable
 - (void)handleUnsubscribeMessageId:(int)messageId;
 - (void)handleSubscribeMessageId:(int)messageId qosCount:(int)qosCount grantedQos:(const int *)grantedQos;
-- (void)handleMessage:(const struct mosquitto_message *)message;
+- (void)handleMessage:(MosquittoMessage *)message;
 - (void)handlePublish:(int)messageId;
-- (void)registerObserver:(id<MosquittoCenterObserver>)object forTopic:(NSString *)topic;
-- (void)removeObserver:(id<MosquittoCenterObserver>)object forTopic:(NSString *)topic;
 
 @end
