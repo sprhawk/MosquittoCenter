@@ -63,6 +63,7 @@ extern NSString * const MosquittoStateChangedNotification;
                   port:(NSUInteger)port
              keepAlive:(NSUInteger)keepAlive;
 - (BOOL)start;
+//Must call halt before release MosquittoCenter, because NSThread retained
 - (BOOL)halt;
 - (BOOL)disconnect;
 - (BOOL)subscribe:(MosquittoTopic *)topic;
